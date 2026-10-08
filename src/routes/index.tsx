@@ -3,11 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeFile, fmt, type Analysis } from "@/lib/audio";
 import { fetchSurah, fetchSurahList, type SurahMeta, type Verse } from "@/lib/quran";
 import { estimateTimings, splitByPauses, splitEvery, type Clip, type Timing } from "@/lib/alignment";
-import { drawFrame, ensureFonts, loadImage, type Aspect } from "@/lib/render";
+import { drawFrame, ensureFonts, loadImage, loadVideo, DEFAULT_STYLE, type Background, type TextStyle, type Aspect } from "@/lib/render";
 import { Waveform } from "@/components/Waveform";
-import kaaba from "@/assets/bg-kaaba.jpg";
-import nature from "@/assets/bg-nature.jpg";
-import mosque from "@/assets/bg-mosque.jpg";
+import { TEMPLATES } from '@/lib/templates';
+import { TextControls } from '@/components/TextControls';
+import { Button } from '@/components/ui/button';
+import type { VerseMatch } from '@/lib/recognition-match';
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -23,11 +24,6 @@ export const Route = createFileRoute("/")({
   component: App,
 });
 
-const TEMPLATES = [
-  { id: "kaaba", label: "الكعبة", src: kaaba },
-  { id: "nature", label: "الطبيعة", src: nature },
-  { id: "mosque", label: "المسجد", src: mosque },
-];
 const STEPS = ["الملف", "الآيات", "المقاطع", "التصدير"];
 
 function App() {
@@ -47,7 +43,11 @@ function App() {
   const [range, setRange] = useState<[number, number]>([1, 7]);
   const [verses, setVerses] = useState<Verse[]>([]);
   const [timings, setTimings] = useState<Timing[]>([]);
-  const [timingSource, setTimingSource] = useState<"" | "manual" | "estimate">("");
+  const [timingSource, setTimingSource] = useState<"" | "manual" | "estimate" | "asr">("");
+  const [matches, setMatches] = useState<VerseMatch[]>([]);
+  const [transcript, setTranscript] = useState('');
+  const recognitionAbort = useRef<AbortController | null>(null);
+  const [recognizing, setRecognizing] = useState(false);
   const [tapIdx, setTapIdx] = useState(0);
 
   const [clips, setClips] = useState<Clip[]>([]);
@@ -55,9 +55,12 @@ function App() {
   const [mode, setMode] = useState<"four" | "pause">("four");
 
   const [aspect, setAspect] = useState<Aspect>("9:16");
-  const [tpl, setTpl] = useState("kaaba");
+  const [tpl, setTpl] = useState("mountains");
   const [customBg, setCustomBg] = useState("");
-  const [bgImg, setBgImg] = useState<HTMLImageElement | null>(null);
+  const [bgImg, setBgImg] = useState<Background | null>(null);
+  const [customVideo, setCustomVideo] = useState(false);
+  const [textStyle, setTextStyle] = useState<TextStyle>(DEFAULT_STYLE);
+  const [bgError, setBgError] = useState('');
   const [exports, setExports] = useState<Record<string, { blob?: Blob; p: number; err?: string }>>({});
   const previewRef = useRef<HTMLCanvasElement>(null);
 
@@ -66,7 +69,7 @@ function App() {
   const surahMeta = surahs.find((s) => s.number === surah);
   const surahName = surahMeta?.name ?? "";
 
-  useEffect(() => { fetchSurahList().then(setSurahs).catch(() => setErr("تعذر الاتصال بمصدر نص القرآن")); ensureFonts(); }, []);
+  useEffect(() => { fetchSurahList().then(setSurahs).catch(() => setErr("تعذر الاتصال بمصدر نص القرآن")); ensureFonts().catch(() => setErr('تعذر تحميل الخط القرآني')); return () => recognitionAbort.current?.abort(); }, []);
 
   // media clock
   useEffect(() => {
@@ -84,23 +87,38 @@ function App() {
   }, []);
 
   const bgSrc = tpl === "custom" ? customBg : TEMPLATES.find((t) => t.id === tpl)?.src ?? "";
-  useEffect(() => { if (bgSrc) loadImage(bgSrc).then(setBgImg).catch(() => setBgImg(null)); else setBgImg(null); }, [bgSrc]);
+  const backgroundVideo = tpl !== 'custom' || customVideo;
+  useEffect(() => {
+    let cancelled = false; let loaded: Background | null = null; setBgImg(null); setBgError('');
+    if (bgSrc) (backgroundVideo ? loadVideo(bgSrc) : loadImage(bgSrc)).then(bg => { loaded = bg; if (!cancelled) setBgImg(bg); }).catch(() => { if (!cancelled) setBgError('تعذر تحميل الخلفية؛ اختر أخرى أو أعد المحاولة'); });
+    return () => { cancelled = true; if (loaded instanceof HTMLVideoElement) { loaded.pause(); loaded.removeAttribute('src'); loaded.load(); } };
+  }, [bgSrc, backgroundVideo]);
 
   const curIdx = useMemo(() => timings.findIndex((t) => time >= t.start && time < t.end), [timings, time]);
 
   useEffect(() => {
     if (step !== 3 || !previewRef.current) return;
-    const v = verses[curIdx];
-    drawFrame(previewRef.current, aspect, bgImg, v?.text ?? "", v ? `${surahName} • ${v.n}` : surahName);
-  }, [step, curIdx, aspect, bgImg, verses, surahName]);
+    let raf = 0;
+    if (bgImg instanceof HTMLVideoElement) bgImg.play().catch(() => {});
+    const render = () => {
+      const now = mediaRef.current?.currentTime ?? 0;
+      const idx = timings.findIndex(t => now >= t.start && now < t.end);
+      const v = verses[idx]; const timing = timings[idx];
+      const opacity = textStyle.effect === 'fade' && timing ? Math.max(0, Math.min(1, (now - timing.start) / .3, (timing.end - now) / .3)) : 1;
+      if (previewRef.current) drawFrame(previewRef.current, aspect, bgImg, v?.text ?? '', surahName, textStyle, v?.n, opacity);
+      raf = requestAnimationFrame(render);
+    }; render();
+    return () => { cancelAnimationFrame(raf); if (bgImg instanceof HTMLVideoElement) bgImg.pause(); };
+  }, [step, aspect, bgImg, verses, timings, surahName, textStyle]);
 
   async function onFile(f: File) {
+    recognitionAbort.current?.abort();
     setErr(""); setBusy("جارٍ تحليل الصوت…");
     try {
       if (url) URL.revokeObjectURL(url);
       setFile(f); setUrl(URL.createObjectURL(f));
       setAnalysis(await analyzeFile(f));
-      setTimings([]); setClips([]); setExports({});
+      setTimings([]); setClips([]); setExports({}); setMatches([]); setTranscript(''); setTimingSource(''); setTapIdx(0);
     } catch {
       setErr("تعذر قراءة المسار الصوتي من هذا الملف. جرّب MP4 أو MP3 أو M4A آخر.");
       setFile(null);
@@ -112,7 +130,7 @@ function App() {
     try {
       const all = await fetchSurah(surah);
       const v = all.slice(range[0] - 1, range[1]);
-      setVerses(v); setTimings([]); setTimingSource(""); setTapIdx(0); setClips([]);
+      setVerses(v); setTimings([]); setTimingSource(""); setTapIdx(0); setClips([]); setMatches([]); setTranscript(''); setExports({});
     } catch (e) { setErr((e as Error).message); } finally { setBusy(""); }
   }
 
@@ -141,6 +159,20 @@ function App() {
     setTimings((p) => p.map((x, i) => (i === tapIdx - 1 ? { ...x, end: t } : x)));
   }
 
+  async function recognize() {
+    if (!file || !verses.length || recognizing) return;
+    const controller = new AbortController(); recognitionAbort.current = controller;
+    setErr(''); setRecognizing(true); setBusy('تحميل النموذج المحلي…');
+    try {
+      const { recognizeRecitation } = await import('@/lib/recognition');
+      const result = await recognizeRecitation(file, verses, setBusy, controller.signal);
+      setMatches(result.matches); setTranscript(result.transcript); setTimingSource('asr');
+      setTimings(result.matches.map(m => m.timing ?? { start: 0, end: 0 })); setClips([]); setExports({}); setTapIdx(0);
+      if (!result.matches.some(m => m.timing)) setErr('لم يطابق النموذج بدايات الآيات بثقة. لم تُنشأ أوقات تخمينية؛ استخدم الضبط اليدوي.');
+    } catch (e) { if ((e as Error).name !== 'AbortError') setErr(`تعذر التعرف المحلي: ${(e as Error).message}. الضبط اليدوي ما زال متاحًا.`); }
+    finally { setBusy(''); setRecognizing(false); recognitionAbort.current = null; }
+  }
+
   function estimate() {
     if (!analysis) return;
     const s = analysis.silences;
@@ -152,15 +184,17 @@ function App() {
   }
 
   function setTiming(i: number, field: "start" | "end", v: number) {
+    if (!Number.isFinite(v) || v < 0 || v > duration) return;
+    setClips([]); setExports({});
     setTimings((p) => p.map((x, j) => {
       if (j === i) return field === "start" ? { ...x, start: v } : { ...x, end: v };
-      if (field === "start" && j === i - 1) return { ...x, end: v };
-      if (field === "end" && j === i + 1) return { ...x, start: v };
+      if (field === "start" && j === i - 1 && x.end > x.start) return { ...x, end: v };
+      if (field === "end" && j === i + 1 && x.end > x.start) return { ...x, start: v };
       return x;
     }));
   }
 
-  const timingsReady = timings.length === verses.length && verses.length > 0 && timings.every((t) => t.end > t.start);
+  const timingsReady = timings.length === verses.length && verses.length > 0 && timings.every((t, i) => t.end > t.start && t.start >= 0 && t.end <= duration && (i === 0 || t.start >= timings[i - 1].end));
 
   function makeClips(m = mode) {
     setClips(m === "four" ? splitEvery(timings, 4) : splitByPauses(timings, analysis?.silences ?? []));
@@ -179,7 +213,7 @@ function App() {
       await ensureFonts();
       const { exportClip } = await import("@/lib/exporter");
       const blob = await exportClip({
-        file, clip: c, timings, verses, surahName, aspect, bg: bgImg,
+        file, clip: c, timings, verses, surahName, aspect, bg: bgImg, backgroundUrl: bgSrc, backgroundVideo, style: textStyle,
         onProgress: (p) => setExports((e) => ({ ...e, [c.id]: { p } })),
       });
       setExports((e) => ({ ...e, [c.id]: { p: 1, blob } }));
@@ -290,7 +324,11 @@ function App() {
             {verses.length > 0 && (
               <div className="panel space-y-3">
                 <h2 className="font-semibold">ضبط التوقيت</h2>
-                <p className="note">لا يوجد نموذج تعرّف على التلاوة في هذا الإصدار. المسار الموثوق هو الضبط اليدوي: شغّل التلاوة واضغط «بدأت الآية» عند بداية كل آية. «التقدير التقريبي» يوزّع الآيات حسب طول النص ويلتقط أقرب وقفة صوتية — ويحتاج تدقيقًا دائمًا.</p>
+                 <p className="note">Whisper Base يحلل صوتك محليًا ويطابق الكلمات الموقّتة مع الآيات المختارة. يُحمّل نموذجًا مجانيًا (~150MB)؛ لا تُرسل التلاوة لأي خدمة. دقته تختلف حسب القارئ والتجويد؛ راجع كل بداية، واضبط الآيات غير المطابقة يدويًا. هذا ليس نموذجًا متخصصًا في القرآن.</p>
+                 <Button className="w-full h-auto py-3 whitespace-normal" onClick={recognize} disabled={!!busy}>تعرف تلقائي محلي ومحاذاة الآيات</Button>
+                 {recognizing && <Button variant="secondary" onClick={() => recognitionAbort.current?.abort()}>إلغاء التعرف</Button>}
+                 {timingSource === 'asr' && <p className="note">طوبقت {matches.filter(m => m.timing).length} من {verses.length} آية. الثقة أدناه درجة تطابق الكلمات وليست احتمال صحة التوقيت؛ راجعها بالسماع.</p>}
+                 {transcript && <details className="text-xs text-muted-foreground"><summary>النص الذي سمعه النموذج (ليس نص القرآن)</summary><p className="mt-2">{transcript}</p></details>}
                 <div className="grid grid-cols-2 gap-2">
                   <button className="btn-primary col-span-2 py-4 text-base" onClick={tap} disabled={tapIdx >= verses.length}>
                     {tapIdx < verses.length ? `بدأت الآية ${verses[tapIdx].n}` : "اكتمل الضبط"}
@@ -305,6 +343,7 @@ function App() {
                   {verses.map((v, i) => (
                     <li key={v.n} className={`rounded-lg border p-3 ${i === curIdx ? "border-primary bg-primary/5" : ""}`}>
                       <p className="quran text-lg">{v.text} <span className="text-primary">﴿{v.n}﴾</span></p>
+                       {timingSource === 'asr' && matches[i] && <p className="mt-1 text-xs text-muted-foreground">ثقة المطابقة: {Math.round(matches[i].confidence * 100)}٪ · تغطية الكلمات: {Math.round(matches[i].coverage * 100)}٪ · {matches[i].reason}</p>}
                       {timings[i] && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs" dir="ltr">
                           <input type="number" step={0.1} className="field w-20 py-1" value={+timings[i].start.toFixed(2)} onChange={(e) => setTiming(i, "start", +e.target.value)} />
@@ -366,24 +405,28 @@ function App() {
                   <button key={a} className={aspect === a ? "chip-on" : "chip-off"} onClick={() => { setAspect(a); setExports({}); }} dir="ltr">{a}</button>
                 ))}
               </div>
-              <div className="grid grid-cols-4 gap-2">
+               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {TEMPLATES.map((t) => (
                   <button key={t.id} onClick={() => { setTpl(t.id); setExports({}); }} className={`overflow-hidden rounded-lg border-2 ${tpl === t.id ? "border-primary" : "border-transparent"}`}>
-                    <img src={t.src} alt={t.label} loading="lazy" width={768} height={1344} className="aspect-[3/4] w-full object-cover" />
+                     <img src={t.poster} alt={t.label} loading="lazy" width={480} height={270} className="aspect-video w-full object-cover" />
                     <span className="block py-1 text-xs">{t.label}</span>
                   </button>
                 ))}
                 <label className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed text-xs ${tpl === "custom" ? "border-primary" : ""}`}>
-                  {customBg ? <img src={customBg} alt="خلفية خاصة" className="aspect-[3/4] w-full object-cover" /> : <span className="p-2 text-center">خلفية خاصة +</span>}
-                  <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { setCustomBg(URL.createObjectURL(f)); setTpl("custom"); setExports({}); } }} />
+                   <span className="p-2 text-center">{customBg ? 'خلفية خاصة ✓' : 'فيديو أو صورة خاصة +'}</span>
+                   <input aria-label="خلفية خاصة" type="file" accept="image/*,video/mp4,video/webm" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { if (customBg) URL.revokeObjectURL(customBg); setCustomBg(URL.createObjectURL(f)); setCustomVideo(f.type.startsWith('video')); setTpl("custom"); setExports({}); } }} />
                 </label>
               </div>
+               <TextControls value={textStyle} onChange={value => { setTextStyle(value); setExports({}); }} />
+               {TEMPLATES.filter(t => t.id === tpl).map(t => <p key={t.id} className="text-[11px] text-muted-foreground"><a href={t.source} target="_blank" rel="noreferrer" className="underline">{t.credit}</a> · <a href={t.license} target="_blank" rel="noreferrer" className="underline">الترخيص</a>{(tpl === 'kaaba' || tpl === 'mosque') && ' — اذكر المصدر عند مشاركة الفيديو.'}</p>)}
+               <p className="text-[11px] text-muted-foreground">خطا Amiri من المصدر الأصلي · SIL Open Font License · النص: <a href="https://tanzil.net" target="_blank" rel="noreferrer" className="underline">Tanzil</a></p>
+               {bgError && <p className="text-sm text-destructive">{bgError}</p>}
             </div>
             <div className="panel flex flex-col items-center gap-2">
               <canvas ref={previewRef} className={`rounded-lg ${aspect === "16:9" ? "w-full" : aspect === "1:1" ? "w-3/4" : "w-1/2"}`} />
               <p className="text-[11px] text-muted-foreground">معاينة حيّة متزامنة مع موضع التشغيل — هي نفس الإطارات التي تُرمَّز في MP4.</p>
             </div>
-            <button className="btn-primary w-full" onClick={exportZip} disabled={!!busy || clips.length === 0}>تصدير الكل كملف ZIP</button>
+             <button className="btn-primary w-full" onClick={exportZip} disabled={!!busy || clips.length === 0 || !bgImg}>تصدير الكل كملف ZIP</button>
             <p className="text-[11px] text-muted-foreground">التصدير يتم بـ FFmpeg داخل المتصفح (يُحمَّل ~30MB أول مرة). قد يكون بطيئًا على الهواتف الضعيفة.</p>
             {clips.map((c, k) => {
               const ex = exports[c.id];
@@ -400,11 +443,11 @@ function App() {
                   {ex?.blob && <video src={URL.createObjectURL(ex.blob)} controls playsInline className="max-h-80 w-full rounded-lg bg-muted" />}
                   <div className="flex gap-2">
                     {!ex?.blob ? (
-                      <button className="btn-primary btn-sm" disabled={!!ex && !ex.err} onClick={() => doExport(c)}>تصدير MP4</button>
+                       <button className="btn-primary btn-sm" disabled={!!busy || !bgImg || Object.values(exports).some(e => !e.blob && !e.err)} onClick={() => doExport(c)}>تصدير MP4</button>
                     ) : (
                       <>
-                        <button className="btn-primary btn-sm" onClick={async () => (await import("@/lib/exporter")).shareOrDownload(ex.blob!, clipName(c))}>مشاركة</button>
-                        <button className="btn-ghost btn-sm" onClick={async () => (await import("@/lib/exporter")).download(ex.blob!, clipName(c))}>تنزيل MP4</button>
+                         <button className="btn-primary btn-sm" onClick={async () => { if (ex.blob) (await import("@/lib/exporter")).shareOrDownload(ex.blob, clipName(c)); }}>مشاركة</button>
+                         <button className="btn-ghost btn-sm" onClick={async () => { if (ex.blob) (await import("@/lib/exporter")).download(ex.blob, clipName(c)); }}>تنزيل MP4</button>
                       </>
                     )}
                   </div>
