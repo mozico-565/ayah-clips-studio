@@ -153,7 +153,7 @@ function App() {
 
   function setTiming(i: number, field: "start" | "end", v: number) {
     setTimings((p) => p.map((x, j) => {
-      if (j === i) return { ...x, [field]: v };
+      if (j === i) return field === "start" ? { ...x, start: v } : { ...x, end: v };
       if (field === "start" && j === i - 1) return { ...x, end: v };
       if (field === "end" && j === i + 1) return { ...x, start: v };
       return x;
@@ -186,6 +186,7 @@ function App() {
       return blob;
     } catch (er) {
       setExports((e) => ({ ...e, [c.id]: { p: 0, err: (er as Error).message || "فشل التصدير" } }));
+      return undefined;
     }
   }
 
