@@ -55,6 +55,9 @@
   --input: oklch(0.3 0.015 170);
   --ring: oklch(0.78 0.11 80);
   --wave: oklch(0.55 0.06 165);
+  --video-background: #0b0f0e;
+  --video-shade: #000000;
+  --video-shadow: rgba(0,0,0,.8);
 }
 
 @layer base {
@@ -77,6 +80,6 @@
   .chip { @apply rounded-full border px-3 py-1.5 text-xs transition; }
   .chip-on { @apply rounded-full border px-3 py-1.5 text-xs transition border-primary bg-primary/15 text-primary; }
   .chip-off { @apply rounded-full border px-3 py-1.5 text-xs transition text-muted-foreground; }
-  .quran { font-family: var(--font-quran); line-height: 2.1; }
+  .quran { font-family: "Ayah Uthmani", var(--font-quran); line-height: 2.1; }
   .note { @apply rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning; }
 }
