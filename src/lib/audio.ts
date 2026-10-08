@@ -3,9 +3,11 @@ export type Analysis = { duration: number; peaks: Float32Array; silences: Silenc
 
 /** Decode the file's audio track (works for MP4 video too) at a low sample rate to save memory. */
 export async function analyzeFile(file: File): Promise<Analysis> {
-  const buf = await file.arrayBuffer();
+  let buf = await file.arrayBuffer();
   const ctx = new OfflineAudioContext(1, 1, 8000);
-  const audio = await ctx.decodeAudioData(buf);
+  let audio: AudioBuffer;
+  try { audio = await ctx.decodeAudioData(buf); }
+  catch { const { extractAudio } = await import('./exporter'); buf = await (await extractAudio(file)).arrayBuffer(); audio = await ctx.decodeAudioData(buf); }
   const ch = audio.getChannelData(0);
   const sr = audio.sampleRate;
   const bins = 2000;

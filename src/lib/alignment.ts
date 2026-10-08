@@ -5,12 +5,12 @@ export type Timing = { start: number; end: number };
 export type Clip = { id: string; from: number; to: number; start: number; end: number }; // verse indices inclusive
 
 /**
- * Alignment architecture (no speech recognition model is bundled):
+ * Manual and explicitly approximate fallback timings. Real ASR lives in recognition.ts.
  *  1. Manual: user taps at each verse start while listening (source of truth).
  *  2. Estimate: distribute [start,end] proportionally to verse letter count, then snap
  *     each boundary to the nearest detected silence within ±4s. This is a heuristic and
  *     MUST be reviewed by the user.
- *  A future ASR/forced-alignment model would plug in here by returning Timing[].
+ *  Recognition returns only validated timestamped word matches, leaving failures for review.
  */
 export function estimateTimings(verses: Verse[], start: number, end: number, silences: Silence[]): Timing[] {
   const lens = verses.map((v) => v.text.replace(/[\s\u064B-\u065F\u0670\u06D6-\u06ED]/g, "").length || 1);
